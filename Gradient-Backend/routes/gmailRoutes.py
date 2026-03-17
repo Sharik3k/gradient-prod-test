@@ -1,12 +1,23 @@
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Depends, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field
 
 from service.syncService import sync_gmail_to_sheets
-from service.sheetService import build_leads_payload, update_lead_status
+from service.sheetService import build_leads_payload, build_leads_payload_from_db
 from service.aiService import analyze_email, generate_email_replies
 from service.settingsService import get_reply_prompts
+from service.leadService import get_current_user_role
 
 router = APIRouter(prefix="/gmail", tags=["Gmail"])
+security = HTTPBearer()
+
+def get_user_from_token(credentials: HTTPAuthorizationCredentials = Security(security)):
+    """Extract user info from Authorization header"""
+    try:
+        token = credentials.credentials
+        return get_current_user_role(token)
+    except:
+        return None
 
 @router.post("/sync")
 def manual_sync():
@@ -15,8 +26,16 @@ def manual_sync():
 
 
 @router.get("/leads")
-def get_leads(limit: int | None = Query(default=120, ge=1, le=500)):
-    payload = build_leads_payload(limit)
+def get_leads(
+    limit: int | None = Query(default=120, ge=1, le=500),
+    user_info: dict | None = Depends(get_user_from_token)
+):
+    if user_info:
+        # Use role-based filtering from database
+        payload = build_leads_payload_from_db(limit, user_info)
+    else:
+        # Fallback to original sheet-based approach
+        payload = build_leads_payload(limit)
     return payload
 
 

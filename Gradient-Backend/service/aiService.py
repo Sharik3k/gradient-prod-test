@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 from openai import OpenAI
 from ddgs import DDGS
+#from duckduckgo_search import DDGS
 import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import re

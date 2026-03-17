@@ -14,7 +14,8 @@ def init_db():
         id INTEGER PRIMARY KEY,
         username TEXT UNIQUE NOT NULL,
         email TEXT NOT NULL,
-        password TEXT NOT NULL
+        password TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'manager' CHECK (role IN ('admin', 'manager'))
     )
     """)
 
@@ -48,8 +49,11 @@ def init_db():
         person_summary TEXT,
         person_insights TEXT,
         company_insights TEXT,
+        assigned_to INTEGER,
+        assigned_at TIMESTAMP,
         synced_at TIMESTAMP,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (assigned_to) REFERENCES users (id)
     )
     """)
 

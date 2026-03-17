@@ -8,6 +8,7 @@ from typing import Any
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from dotenv import load_dotenv
+from db import conn
 
 load_dotenv()
 
@@ -315,4 +316,235 @@ def build_leads_payload(limit: int | None = 120) -> dict[str, Any]:
         "month": month_chart,
         "pie": pie_chart,
         "generated_at": now.isoformat(),
+    }
+
+
+def build_leads_payload_from_db(limit: int | None = 120, user_info: dict | None = None) -> dict[str, Any]:
+    """Build leads payload from database with role-based filtering"""
+    
+    # Build query based on user role
+    if user_info and user_info.get("role") == "admin":
+        # Admin sees all leads with assignment info
+        query = """
+            SELECT 
+                gmail_id, status, first_name, last_name, full_name, email, subject, 
+                received_at, company, body, phone, website, company_name, company_info,
+                person_role, person_links, person_location, person_experience, person_summary,
+                person_insights, company_insights, assigned_to, assigned_at, synced_at, created_at,
+                u.username as assigned_username, u.role as assigned_role
+            FROM gmail_messages gm
+            LEFT JOIN users u ON gm.assigned_to = u.id
+            ORDER BY created_at DESC
+            LIMIT ?
+        """
+        leads_data = conn.execute(query, [limit]).fetchall()
+        
+        leads = []
+        for lead in leads_data:
+            lead_dict = {
+                "gmail_id": lead[0],
+                "status": lead[1] or "waiting",
+                "first_name": lead[2] or "",
+                "last_name": lead[3] or "",
+                "full_name": lead[4] or "",
+                "email": lead[5] or "",
+                "subject": lead[6] or "",
+                "received_at": lead[7] or "",
+                "company": lead[8] or "",
+                "body": lead[9] or "",
+                "phone": lead[10] or "",
+                "website": lead[11] or "",
+                "company_name": lead[12] or "",
+                "company_info": lead[13] or "",
+                "person_role": lead[14] or "",
+                "person_links": lead[15] or "",
+                "person_location": lead[16] or "",
+                "person_experience": lead[17] or "",
+                "person_summary": lead[18] or "",
+                "person_insights": lead[19] or "",
+                "company_insights": lead[20] or "",
+                "assigned_to": lead[21],
+                "assigned_at": lead[22],
+                "synced_at": lead[23],
+                "created_at": lead[24],
+                "assigned_username": lead[25],
+                "assigned_role": lead[26],
+                "assigned_display": f"[{lead[26].upper()}] {lead[25]}" if lead[25] else None
+            }
+            
+            # Process JSON fields
+            if lead_dict["person_links"]:
+                try:
+                    lead_dict["person_links"] = json.loads(lead_dict["person_links"])
+                except:
+                    lead_dict["person_links"] = []
+            else:
+                lead_dict["person_links"] = []
+                
+            for field in ["person_insights", "company_insights"]:
+                if lead_dict[field]:
+                    try:
+                        lead_dict[field] = json.loads(lead_dict[field])
+                    except:
+                        lead_dict[field] = []
+                else:
+                    lead_dict[field] = []
+            
+            leads.append(lead_dict)
+    
+    elif user_info and user_info.get("role") == "manager":
+        # Manager sees only their assigned leads
+        query = """
+            SELECT 
+                gmail_id, status, first_name, last_name, full_name, email, subject, 
+                received_at, company, body, phone, website, company_name, company_info,
+                person_role, person_links, person_location, person_experience, person_summary,
+                person_insights, company_insights, assigned_to, assigned_at, synced_at, created_at
+            FROM gmail_messages 
+            WHERE assigned_to = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+        """
+        leads_data = conn.execute(query, [user_info["id"], limit]).fetchall()
+        
+        leads = []
+        for lead in leads_data:
+            lead_dict = {
+                "gmail_id": lead[0],
+                "status": lead[1] or "waiting",
+                "first_name": lead[2] or "",
+                "last_name": lead[3] or "",
+                "full_name": lead[4] or "",
+                "email": lead[5] or "",
+                "subject": lead[6] or "",
+                "received_at": lead[7] or "",
+                "company": lead[8] or "",
+                "body": lead[9] or "",
+                "phone": lead[10] or "",
+                "website": lead[11] or "",
+                "company_name": lead[12] or "",
+                "company_info": lead[13] or "",
+                "person_role": lead[14] or "",
+                "person_links": lead[15] or "",
+                "person_location": lead[16] or "",
+                "person_experience": lead[17] or "",
+                "person_summary": lead[18] or "",
+                "person_insights": lead[19] or "",
+                "company_insights": lead[20] or "",
+                "assigned_to": lead[21],
+                "assigned_at": lead[22],
+                "synced_at": lead[23],
+                "created_at": lead[24]
+            }
+            
+            # Process JSON fields
+            if lead_dict["person_links"]:
+                try:
+                    lead_dict["person_links"] = json.loads(lead_dict["person_links"])
+                except:
+                    lead_dict["person_links"] = []
+            else:
+                lead_dict["person_links"] = []
+                
+            for field in ["person_insights", "company_insights"]:
+                if lead_dict[field]:
+                    try:
+                        lead_dict[field] = json.loads(lead_dict[field])
+                    except:
+                        lead_dict[field] = []
+                else:
+                    lead_dict[field] = []
+            
+            leads.append(lead_dict)
+    
+    else:
+        # No user info, return empty leads
+        leads = []
+    
+    # Calculate stats
+    now = datetime.utcnow()
+    active_cutoff = now - timedelta(days=30)
+    
+    total = len(leads)
+    qualified_total = 0
+    waiting_total = 0
+    active_total = 0
+    
+    month_totals: dict[tuple[int, int], dict[str, int]] = defaultdict(lambda: {"total": 0, "qualified": 0})
+    week_totals = [0, 0, 0, 0]
+    week_qualified = [0, 0, 0, 0]
+    
+    for lead in leads:
+        lead_dt = _parse_datetime(lead.get("received_at"))
+        qualified = _is_qualified(lead)
+        if qualified:
+            qualified_total += 1
+        
+        if (lead.get("status") or "waiting").lower() == "waiting" and not qualified:
+            waiting_total += 1
+        
+        if lead_dt:
+            if lead_dt >= active_cutoff:
+                active_total += 1
+            
+            key = (lead_dt.year, lead_dt.month)
+            month_totals[key]["total"] += 1
+            if qualified:
+                month_totals[key]["qualified"] += 1
+            
+            diff_days = (now - lead_dt).days
+            if diff_days < 0:
+                diff_days = 0
+            week_index = diff_days // 7
+            if week_index < 4:
+                slot = 3 - week_index
+                week_totals[slot] += 1
+                if qualified:
+                    week_qualified[slot] += 1
+    
+    month_buckets = _generate_month_buckets()
+    line_chart = []
+    for bucket in month_buckets:
+        key = (bucket.year, bucket.month)
+        bucket_totals = month_totals.get(key, {"total": 0, "qualified": 0})
+        line_chart.append({
+            "name": MONTH_LABELS[bucket.month - 1],
+            "pv": bucket_totals["total"],
+            "uv": bucket_totals["qualified"],
+        })
+    
+    quarter_chart = line_chart[-3:] if line_chart else []
+    
+    month_chart = [
+        {"name": label, "pv": week_totals[idx], "uv": week_qualified[idx]}
+        for idx, label in enumerate(WEEK_LABELS)
+    ]
+    
+    percentage = 0
+    if total:
+        percentage = int(round((qualified_total / total) * 100))
+    
+    pie_chart = [
+        {"value": percentage},
+        {"value": max(0, 100 - percentage)},
+    ] if total else [{"value": 0}, {"value": 100}]
+    
+    stats = {
+        "active": active_total,
+        "completed": total,
+        "percentage": percentage,
+        "qualified": qualified_total,
+        "waiting": waiting_total,
+    }
+    
+    return {
+        "leads": leads,
+        "stats": stats,
+        "line": line_chart,
+        "quarter": quarter_chart,
+        "month": month_chart,
+        "pie": pie_chart,
+        "generated_at": now.isoformat(),
+        "user_role": user_info.get("role") if user_info else None,
+        "user_id": user_info.get("id") if user_info else None
     }
