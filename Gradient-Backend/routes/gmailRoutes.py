@@ -28,11 +28,12 @@ def manual_sync():
 @router.get("/leads")
 def get_leads(
     limit: int | None = Query(default=120, ge=1, le=500),
+    range_days: int | None = Query(default=None, ge=1, le=3650),
     user_info: dict | None = Depends(get_user_from_token)
 ):
     if user_info:
         # Use role-based filtering from database
-        payload = build_leads_payload_from_db(limit, user_info)
+        payload = build_leads_payload_from_db(limit, user_info, range_days=range_days)
     else:
         # Fallback to original sheet-based approach
         payload = build_leads_payload(limit)
@@ -91,15 +92,33 @@ def generate_replies(payload: ReplyGenerationRequest):
 
 
 class LeadStatusUpdateRequest(BaseModel):
-    row_number: int = Field(gt=0)
+    row_number: int | None = Field(gt=0, default=None)
+    gmail_id: str | None = None
     status: str
+    rejection_reason: str | None = None
 
 
 @router.post("/lead-status")
 def set_lead_status(payload: LeadStatusUpdateRequest):
     try:
-        update_lead_status(payload.row_number, payload.status)
+        if payload.gmail_id:
+            update_lead_status_gmail_id(
+                gmail_id=payload.gmail_id,
+                status=payload.status,
+                rejection_reason=payload.rejection_reason
+            )
+        else:
+            update_lead_status(
+                row_number=payload.row_number,
+                status=payload.status,
+                rejection_reason=payload.rejection_reason
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return {"row_number": payload.row_number, "status": payload.status}
+    return {
+        "row_number": payload.row_number,
+        "gmail_id": payload.gmail_id,
+        "status": payload.status,
+        "rejection_reason": payload.rejection_reason
+    }

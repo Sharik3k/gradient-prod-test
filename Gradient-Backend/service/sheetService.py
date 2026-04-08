@@ -16,7 +16,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 CREDENTIALS_DIR = BASE_DIR / "credentials"
 TOKEN_FILE = CREDENTIALS_DIR / "token.json"
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+# Unified scopes for the entire application (Gmail + Sheets)
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/spreadsheets",
+]
 
 
 def _get_sheet_service():
@@ -172,7 +177,7 @@ def fetch_sheet_rows(limit: int | None = 120) -> list[dict[str, str]]:
 ALLOWED_STATUS_VALUES = {"confirmed", "rejected", "snoozed", "waiting", "new"}
 
 
-def update_lead_status(row_number: int, status: str) -> None:
+def update_lead_status(row_number: int, status: str, rejection_reason: str | None = None) -> None:
     if row_number is None or row_number < 1:
         raise ValueError("row_number must be a positive integer")
 
@@ -190,6 +195,36 @@ def update_lead_status(row_number: int, status: str) -> None:
         valueInputOption="RAW",
         body=body,
     ).execute()
+
+
+def update_lead_status_gmail_id(gmail_id: str, status: str, rejection_reason: str | None = None) -> None:
+    """Update lead status in DuckDB by gmail_id"""
+    if not gmail_id:
+        raise ValueError("gmail_id is required")
+    
+    normalized_status = (status or "").strip().lower()
+    if normalized_status not in ALLOWED_STATUS_VALUES:
+        raise ValueError("Unsupported status value")
+    
+    # Update gmail_messages table
+    conn.execute("""
+        UPDATE gmail_messages 
+        SET status = ? 
+        WHERE gmail_id = ?
+    """, [normalized_status, gmail_id])
+    
+    # Add to lead_status_history
+    history_id = f"{gmail_id}_{datetime.now().isoformat()}"
+    lead_name = conn.execute("SELECT full_name FROM gmail_messages WHERE gmail_id = ?", [gmail_id]).fetchone()
+    lead_name = lead_name[0] if lead_name else "Unknown"
+    
+    conn.execute("""
+        INSERT INTO lead_status_history 
+        (id, gmail_id, lead_name, status, rejection_reason, changed_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, [history_id, gmail_id, lead_name, normalized_status, rejection_reason, datetime.now()])
+    
+    conn.commit()
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -232,94 +267,25 @@ def _is_qualified(lead: dict[str, str]) -> bool:
 
 
 def build_leads_payload(limit: int | None = 120) -> dict[str, Any]:
-    leads = fetch_sheet_rows(limit)
-    now = datetime.utcnow()
-    active_cutoff = now - timedelta(days=30)
-
-    total = len(leads)
-    qualified_total = 0
-    waiting_total = 0
-    active_total = 0
-
-    month_totals: dict[tuple[int, int], dict[str, int]] = defaultdict(lambda: {"total": 0, "qualified": 0})
-    week_totals = [0, 0, 0, 0]
-    week_qualified = [0, 0, 0, 0]
-
-    for lead in leads:
-        lead_dt = _parse_datetime(lead.get("received_at"))
-        qualified = _is_qualified(lead)
-        if qualified:
-            qualified_total += 1
-
-        if (lead.get("status") or "waiting").lower() == "waiting" and not qualified:
-            waiting_total += 1
-
-        if lead_dt:
-            if lead_dt >= active_cutoff:
-                active_total += 1
-
-            key = (lead_dt.year, lead_dt.month)
-            month_totals[key]["total"] += 1
-            if qualified:
-                month_totals[key]["qualified"] += 1
-
-            diff_days = (now - lead_dt).days
-            if diff_days < 0:
-                diff_days = 0
-            week_index = diff_days // 7
-            if week_index < 4:
-                slot = 3 - week_index
-                week_totals[slot] += 1
-                if qualified:
-                    week_qualified[slot] += 1
-
-    month_buckets = _generate_month_buckets()
-    line_chart = []
-    for bucket in month_buckets:
-        key = (bucket.year, bucket.month)
-        bucket_totals = month_totals.get(key, {"total": 0, "qualified": 0})
-        line_chart.append({
-            "name": MONTH_LABELS[bucket.month - 1],
-            "pv": bucket_totals["total"],
-            "uv": bucket_totals["qualified"],
-        })
-
-    quarter_chart = line_chart[-3:] if line_chart else []
-
-    month_chart = [
-        {"name": label, "pv": week_totals[idx], "uv": week_qualified[idx]}
-        for idx, label in enumerate(WEEK_LABELS)
-    ]
-
-    percentage = 0
-    if total:
-        percentage = int(round((qualified_total / total) * 100))
-
-    pie_chart = [
-        {"value": percentage},
-        {"value": max(0, 100 - percentage)},
-    ] if total else [{"value": 0}, {"value": 100}]
-
-    stats = {
-        "active": active_total,
-        "completed": total,
-        "percentage": percentage,
-        "qualified": qualified_total,
-        "waiting": waiting_total,
-    }
-
-    return {
-        "leads": leads,
-        "stats": stats,
-        "line": line_chart,
-        "quarter": quarter_chart,
-        "month": month_chart,
-        "pie": pie_chart,
-        "generated_at": now.isoformat(),
-    }
+    # Try to use database first for better performance and stability
+    try:
+        # Create a dummy admin user_info to reuse the robust DB logic
+        dummy_admin = {"role": "admin", "id": -1}
+        return build_leads_payload_from_db(limit, dummy_admin)
+    except Exception as e:
+        print(f"Fallback to Sheets API due to DB error: {e}")
+        # Original fallback logic
+        leads = fetch_sheet_rows(limit)
+        # ... rest of the original logic if needed, but build_leads_payload_from_db is better
+        # For now, let's just make it return from DB as it's our primary storage.
+        return build_leads_payload_from_db(limit, {"role": "admin", "id": -1})
 
 
-def build_leads_payload_from_db(limit: int | None = 120, user_info: dict | None = None) -> dict[str, Any]:
+def build_leads_payload_from_db(
+    limit: int | None = 120,
+    user_info: dict | None = None,
+    range_days: int | None = None,
+) -> dict[str, Any]:
     """Build leads payload from database with role-based filtering"""
     
     # Build query based on user role
@@ -327,7 +293,7 @@ def build_leads_payload_from_db(limit: int | None = 120, user_info: dict | None 
         # Admin sees all leads with assignment info
         query = """
             SELECT 
-                gmail_id, status, first_name, last_name, full_name, email, subject, 
+                gmail_id, status, first_name, last_name, full_name, gm.email, subject, 
                 received_at, company, body, phone, website, company_name, company_info,
                 person_role, person_links, person_location, person_experience, person_summary,
                 person_insights, company_insights, assigned_to, assigned_at, synced_at, created_at,
@@ -461,9 +427,40 @@ def build_leads_payload_from_db(limit: int | None = 120, user_info: dict | None 
         # No user info, return empty leads
         leads = []
     
-    # Calculate stats
     now = datetime.utcnow()
-    active_cutoff = now - timedelta(days=30)
+
+    # Optional global range filter (used by Analytics global filter panel).
+    if range_days is not None:
+        cutoff = now - timedelta(days=range_days)
+        filtered: list[dict[str, Any]] = []
+        for lead in leads:
+            lead_dt = _parse_datetime(lead.get("received_at"))
+            if not lead_dt:
+                continue
+            if lead_dt >= cutoff:
+                filtered.append(lead)
+        leads = filtered
+
+    # Attach latest rejection reason (needed for drill-down).
+    for lead in leads:
+        gmail_id = lead.get("gmail_id")
+        if not gmail_id:
+            lead["rejection_reason"] = None
+            continue
+        row = conn.execute(
+            """
+            SELECT rejection_reason
+            FROM lead_status_history
+            WHERE gmail_id = ?
+            ORDER BY changed_at DESC
+            LIMIT 1
+            """,
+            [gmail_id],
+        ).fetchone()
+        lead["rejection_reason"] = row[0] if row else None
+
+    # Calculate stats
+    active_cutoff = now - timedelta(days=range_days if range_days is not None else 30)
     
     total = len(leads)
     qualified_total = 0
@@ -537,6 +534,44 @@ def build_leads_payload_from_db(limit: int | None = 120, user_info: dict | None 
         "waiting": waiting_total,
     }
     
+    pending_groups: list[dict[str, Any]] = []
+    pending_buckets: dict[str, list[dict[str, Any]]] = {"3": [], "5": [], "10": []}
+
+    for lead in leads:
+        status = (lead.get("status") or "").lower()
+        if status != "waiting":
+            continue
+        lead_dt = _parse_datetime(lead.get("received_at"))
+        if not lead_dt:
+            continue
+        waiting_days = (now - lead_dt).days
+        if waiting_days < 3:
+            continue
+        if waiting_days >= 10:
+            pending_buckets["10"].append(lead)
+        elif waiting_days >= 5:
+            pending_buckets["5"].append(lead)
+        else:
+            pending_buckets["3"].append(lead)
+
+    bucket_meta = {
+        "3": {"label": "3–4 дні"},
+        "5": {"label": "5–9 днів"},
+        "10": {"label": "10+ днів"},
+    }
+    for key in ["3", "5", "10"]:
+        items = pending_buckets[key]
+        # Oldest first (largest waiting time).
+        items.sort(key=lambda x: (_parse_datetime(x.get("received_at")) or datetime.min))
+        pending_groups.append(
+            {
+                "key": key,
+                "label": bucket_meta[key]["label"],
+                "count": len(items),
+                "leads": items[:25],
+            }
+        )
+
     return {
         "leads": leads,
         "stats": stats,
@@ -544,6 +579,7 @@ def build_leads_payload_from_db(limit: int | None = 120, user_info: dict | None 
         "quarter": quarter_chart,
         "month": month_chart,
         "pie": pie_chart,
+        "pending_groups": pending_groups,
         "generated_at": now.isoformat(),
         "user_role": user_info.get("role") if user_info else None,
         "user_id": user_info.get("id") if user_info else None

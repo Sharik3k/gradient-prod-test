@@ -1,8 +1,9 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled, { useTheme } from 'styled-components';
-import { getGmailLeads, postGenerateReplies, postLeadStatus, postLeadInsights } from '../api/client';
-import { useNavigate } from 'react-router-dom';
+import { getGmailLeads, postGenerateReplies, postLeadStatus, postLeadInsights, sendEmailWithAttachments } from '../api/client';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useModalManager } from '../context/ModalManagerContext';
 
 const PageContainer = styled.div`
   display: flex;
@@ -351,15 +352,25 @@ const BADGE_VARIANTS = {
     background: '#ffffff',
     border: '1px solid rgba(71, 85, 105, 0.24)',
   },
+  call_lead: {
+    color: '#7c3aed',
+    background: 'rgba(124, 58, 237, 0.1)',
+    border: '2px solid #7c3aed',
+    fontWeight: '700',
+    boxShadow: '0 0 8px rgba(124, 58, 237, 0.3)',
+  },
 };
 
-const StatusBadge = styled.span`
+const StatusBadge = styled.button`
   border-radius: 999px;
   padding: 0.35rem 0.85rem;
   font-size: 0.8rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
+  cursor: pointer;
+  font-family: inherit;
+  appearance: none;
   ${({ $variant }) => {
     const preset = BADGE_VARIANTS[$variant] ?? BADGE_VARIANTS.new;
     return `
@@ -1195,6 +1206,17 @@ const BADGE_LABELS = {
   qualified: 'Кваліфікований',
   new: 'Новий',
   waiting: 'Очікує',
+  call_lead: '📞 Дзвінок з лідом',
+};
+
+const STATUS_TOOLTIPS = {
+  confirmed: 'Лід підтверджено - готовий до подальшої роботи',
+  rejected: 'Лід відхилено - не релевантний',
+  snoozed: 'Лід відкладено - повернутись пізніше',
+  qualified: 'Кваліфікований лід - має контактні дані',
+  new: 'Новий лід - потребує опрацювання',
+  waiting: 'Очікує на відповідь або дію',
+  call_lead: '🎯 ВАЖЛИВО: Потрібно зателефонувати ліду!',
 };
 
 const getLeadKey = (lead) => {
@@ -1358,8 +1380,10 @@ const formatRelative = (value) => {
 
 const Automation = () => {
   const theme = useTheme();
-  const { leadSnapshot, updateLeadSnapshot } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const { activeModals, openModal, closeModal: closeGlobalModal } = useModalManager();
+  const { leadSnapshot, updateLeadSnapshot, pushNotification } = useAuth();
   const { data, loading, error, refresh } = useLeadData(leadSnapshot, updateLeadSnapshot);
   const [searchTerm, setSearchTerm] = useState('');
   const [stageFilter, setStageFilter] = useState('all');
@@ -1447,6 +1471,47 @@ const Automation = () => {
       });
   }, [orderedLeads]);
 
+  const handleRowClick = useCallback(async (lead) => {
+    setSelectedLead(lead);
+    setShowReader(false);
+    setShowReplyComposer(false);
+    setInsightsError(null);
+    setReplyOptions({ quick: '', follow_up: '', recap: '' });
+    setSelectedReplyKey('');
+    setReplyDraft('');
+    setReplyError(null);
+    setReplyStyle('semi_official');
+
+    try {
+      const needsEnrichment = !lead?.full_name && !lead?.company_info && !lead?.person_summary;
+      if (!needsEnrichment) return;
+
+      const enriched = await postLeadInsights({
+        sender: lead.email || 'unknown@example.com',
+        subject: lead.subject || '',
+        body: lead.body || '',
+      });
+      if (enriched) {
+        setSelectedLead((prev) => ({ ...(prev || lead), ...enriched }));
+      }
+    } catch (err) {
+      setInsightsError(err?.message || 'Не вдалося завантажити інсайти.');
+    }
+  }, []);
+
+  // Effect to open lead if passed from Analytics
+  useEffect(() => {
+    const emailToOpen = location.state?.openLeadEmail;
+    if (emailToOpen && dedupedLeads.length > 0) {
+      const lead = dedupedLeads.find(l => l.email === emailToOpen);
+      if (lead) {
+        // Clear state to avoid reopening on every render
+        window.history.replaceState({}, document.title);
+        handleRowClick(lead);
+      }
+    }
+  }, [location.state, dedupedLeads, handleRowClick]);
+
   const filteredLeads = useMemo(() => {
     const text = searchTerm.trim().toLowerCase();
     const now = new Date();
@@ -1462,10 +1527,19 @@ const Automation = () => {
 
       const qualified = isQualifiedLead(lead);
       const decisionStatus = decisions[getLeadKey(lead)]?.status;
-      const status = decisionStatus ?? getLeadStatus(lead);
-      if (stageFilter === 'qualified' && !qualified) return false;
-      if (stageFilter === 'new' && (qualified || status === 'waiting')) return false;
-      if (stageFilter === 'waiting' && status !== 'waiting') return false;
+      const status = (decisionStatus ?? getLeadStatus(lead) ?? '').toLowerCase();
+      const badgeVariantForFilter =
+        status === 'call_lead'
+          ? 'call_lead'
+          : ['confirmed', 'rejected', 'snoozed'].includes(status)
+            ? status
+            : status === 'waiting'
+              ? 'waiting'
+              : qualified
+                ? 'qualified'
+                : 'new';
+
+      if (stageFilter !== 'all' && badgeVariantForFilter !== stageFilter) return false;
 
       if (!text) return true;
 
@@ -1586,6 +1660,17 @@ const Automation = () => {
     setReplyAttachments([]);
   }, []);
 
+  const closeLocalModal = useCallback(() => {
+    setSelectedLead(null);
+    setShowReader(false);
+    setShowReplyComposer(false);
+    setReplyOptionsByStyle({ official: null, semi_official: null });
+    setReplyDraft('');
+    setReplyError(null);
+    setReplyStyle('semi_official');
+    setReplyAttachments([]);
+  }, []);
+
   const handlePickAttachments = useCallback(() => {
     fileInputRef.current?.click?.();
   }, []);
@@ -1613,40 +1698,10 @@ const Automation = () => {
     setRangeMenuOpen(false);
   };
 
-  const handleRowClick = async (lead) => {
-    setSelectedLead(lead);
-    setShowReader(false);
-    setShowReplyComposer(false);
-    setInsightsError(null);
-    setReplyOptions({ quick: '', follow_up: '', recap: '' });
-    setSelectedReplyKey('');
-    setReplyDraft('');
-    setReplyError(null);
-    setReplyStyle('semi_official');
-
-    try {
-      const needsEnrichment = !lead?.full_name && !lead?.company_info && !lead?.person_summary;
-      if (!needsEnrichment) return;
-
-      const enriched = await postLeadInsights({
-        sender: lead.email || 'unknown@example.com',
-        subject: lead.subject || '',
-        body: lead.body || '',
-      });
-      if (enriched) {
-        setSelectedLead((prev) => ({ ...(prev || lead), ...enriched }));
-      }
-    } catch (err) {
-      setInsightsError(err?.message || 'Не вдалося завантажити інсайти.');
-    }
-  };
-
   const handleRowKeyDown = (event, lead) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      setSelectedLead(lead);
-      setShowReader(false);
-      setShowReplyComposer(false);
+      handleRowClick(lead);
     }
   };
 
@@ -1725,6 +1780,63 @@ const Automation = () => {
     await refresh({ isManualRefresh: true });
   }, [refresh]);
 
+  const handleDecisionWithReason = useCallback(
+    async (status, rejectionReason) => {
+      if (!selectedLead) return;
+
+      const gmailId = selectedLead.gmail_id || selectedLead.gmailId;
+      const rowNumber = selectedLead.sheet_row || selectedLead.sheetRow;
+      if (!gmailId && !rowNumber) {
+        setStatusError('Не знайдено ідентифікатор ліда для збереження статусу.');
+        return;
+      }
+
+      const decidedAt = new Date().toISOString();
+      setDecisions((prev) => ({
+        ...prev,
+        [getLeadKey(selectedLead)]: {
+          status,
+          decidedAt,
+          rejectionReason,
+        },
+      }));
+      setStatusError(null);
+
+      closeLocalModal();
+
+      try {
+        if (gmailId) {
+          await postLeadStatus({ 
+            gmail_id: gmailId, 
+            status,
+            rejection_reason: rejectionReason 
+          });
+        } else {
+          await postLeadStatus({ 
+            row_number: rowNumber, 
+            status,
+            rejection_reason: rejectionReason 
+          });
+        }
+        await refresh({ isManualRefresh: true });
+        pushNotification({
+          variant: 'success',
+          title: 'Статус оновлено',
+          message: `Статус змінено на "${DECISION_LABELS[status]}"${rejectionReason ? ` з причиною: ${rejectionReason}` : ''}`,
+        });
+      } catch (error) {
+        setDecisions((prev) => {
+          const key = getLeadKey(selectedLead);
+          const updated = { ...prev };
+          delete updated[key];
+          return updated;
+        });
+        setStatusError(error instanceof Error ? error.message : 'Не вдалося оновити статус.');
+      }
+    },
+    [selectedLead, closeModal, refresh, pushNotification, closeLocalModal]
+  );
+
   const handleConfirmClick = useCallback(async () => {
     if (!selectedLead || replyLoading) return;
     // Open immediately, then fill content as it arrives.
@@ -1744,53 +1856,125 @@ const Automation = () => {
     async (status) => {
       if (!selectedLead) return;
 
-      const gmailId = selectedLead.gmail_id;
-      const rowNumber = selectedLead.sheet_row || selectedLead.sheetRow;
-      if (!gmailId && !rowNumber) {
-        setStatusError('Не знайдено ідентифікатор ліда для збереження статусу.');
+      if (status === 'rejected') {
+        openModal({
+          id: 'reject-form',
+          type: 'reject_modal',
+          props: {
+            title: 'Відхилення ліда',
+            content: (
+              <div style={{ padding: '0.8rem 0.2rem' }}>
+                <p style={{ marginTop: 0 }}>
+                  <strong>Лід:</strong> {selectedLead.full_name || selectedLead.email}
+                </p>
+                <p style={{ marginBottom: '1rem', color: theme.colors.subtleText }}>
+                  Будь ласка, вкажіть причину відхилення
+                </p>
+                <textarea
+                  id="rejection-reason"
+                  required
+                  placeholder="Наприклад: Не відповідає нашим критеріям / Бюджет занадто низький / Не є цільовою аудиторією..."
+                  style={{
+                    width: '100%',
+                    minHeight: '110px',
+                    padding: '0.75rem',
+                    border: `1px solid ${theme.colors.border}`,
+                    borderRadius: '8px',
+                    background: theme.colors.cardBackground,
+                    color: theme.colors.text,
+                    resize: 'vertical',
+                  }}
+                />
+                <div style={{ marginTop: '1rem', display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
+                  <button
+                    onClick={() => closeGlobalModal('reject-form')}
+                    style={{
+                      padding: '0.5rem 1rem',
+                      border: `1px solid ${theme.colors.border}`,
+                      borderRadius: '6px',
+                      background: 'transparent',
+                      color: theme.colors.text,
+                      cursor: 'pointer',
+                    }}
+                    type="button"
+                  >
+                    Скасувати
+                  </button>
+                  <button
+                    onClick={() => {
+                      const reason = document.getElementById('rejection-reason').value.trim();
+                      if (!reason) {
+                        alert('Будь ласка, вкажіть причину відхилення');
+                        return;
+                      }
+                      closeGlobalModal('reject-form');
+                      handleDecisionWithReason(status, reason);
+                    }}
+                    style={{
+                      padding: '0.5rem 1rem',
+                      border: 'none',
+                      borderRadius: '6px',
+                      background: '#be123c',
+                      color: 'white',
+                      cursor: 'pointer',
+                    }}
+                    type="button"
+                  >
+                    Відхилити
+                  </button>
+                </div>
+              </div>
+            ),
+          },
+        });
         return;
       }
 
-      const decidedAt = new Date().toISOString();
-      setDecisions((prev) => ({
-        ...prev,
-        [getLeadKey(selectedLead)]: {
-          status,
-          decidedAt,
-        },
-      }));
-      setStatusError(null);
-
-      closeModal();
-
-      try {
-        if (gmailId) {
-          await postLeadStatus({ gmail_id: gmailId, status });
-        } else {
-          await postLeadStatus({ row_number: rowNumber, status });
-        }
-        await refresh({ isManualRefresh: true });
-        setDecisions((prev) => {
-          const { [getLeadKey(selectedLead)]: _removed, ...rest } = prev;
-          return rest;
-        });
-      } catch (error) {
-        setDecisions((prev) => {
-          const updated = { ...prev };
-          delete updated[getLeadKey(selectedLead)];
-          return updated;
-        });
-        setStatusError(error instanceof Error ? error.message : 'Не вдалося оновити статус.');
-      }
+      handleDecisionWithReason(status, null);
     },
-    [selectedLead, closeModal, refresh]
+    [selectedLead, openModal, closeGlobalModal, theme, handleDecisionWithReason]
   );
+
+  const handleSendReply = useCallback(async () => {
+    if (!selectedLead || !replyDraft.trim()) {
+      setReplyError('Будь ласка, напишіть текст відповіді');
+      return;
+    }
+
+    try {
+      const payload = {
+        to: selectedLead.email,
+        subject: `Re: ${selectedLead.subject || 'Без теми'}`,
+        body: replyDraft,
+        attachments: replyAttachments.map(item => item.file)
+      };
+
+      await sendEmailWithAttachments(payload);
+      
+      pushNotification({
+        variant: 'success',
+        title: 'Лист надіслано',
+        message: `Відповідь надіслано на ${selectedLead.email}${replyAttachments.length > 0 ? ` з ${replyAttachments.length} файлами` : ''}`,
+      });
+
+      // Очистимо форму
+      setReplyDraft('');
+      setReplyAttachments([]);
+      setShowReplyComposer(false);
+      
+      // Оновимо статус ліда
+      await handleDecisionWithReason('confirmed', null);
+      
+    } catch (error) {
+      setReplyError(error?.message || 'Не вдалося надіслати лист');
+    }
+  }, [selectedLead, replyDraft, replyAttachments, pushNotification, handleDecisionWithReason]);
 
   return (
     <PageContainer>
       <PageHeader>
         <TitleBlock>
-          <h1>Автоматизація лідів</h1>
+          <h1>Робоча зона</h1>
           <p>
             Центральна панель для керування вхідними лідами. Відслідковуйте активність, підтвердження відповіді GPT й людини
             та структуруйте фокус команди за хвилини.
@@ -1845,10 +2029,14 @@ const Automation = () => {
             onChange={(event) => setSearchTerm(event.target.value)}
           />
           <Select value={stageFilter} onChange={(event) => setStageFilter(event.target.value)}>
-            <option value="all">Усі ліди</option>
-            <option value="qualified">Лише кваліфіковані</option>
+            <option value="all">Усі статуси</option>
+            <option value="new">Нові</option>
             <option value="waiting">В очікуванні</option>
-            <option value="new">Потребують уточнення</option>
+            <option value="call_lead">Дзвінок з лідом</option>
+            <option value="qualified">Кваліфіковані</option>
+            <option value="confirmed">Підтверджено</option>
+            <option value="rejected">Відхилено</option>
+            <option value="snoozed">Відкладено</option>
           </Select>
           <RangeSelector ref={rangeRef}>
             <RangeButton type="button" onClick={toggleRangeMenu}>
@@ -1909,13 +2097,16 @@ const Automation = () => {
                   const leadStatus = getLeadStatus(lead);
                   const decisionStatus = decision?.status;
                   const resolvedStatus = decisionStatus ?? leadStatus;
-                  const badgeVariant = ['confirmed', 'rejected', 'snoozed'].includes(resolvedStatus)
-                    ? resolvedStatus
-                    : resolvedStatus === 'waiting'
-                    ? 'waiting'
-                    : qualified
-                    ? 'qualified'
-                    : 'new';
+                  const badgeVariant =
+                    resolvedStatus === 'call_lead'
+                      ? 'call_lead'
+                      : ['confirmed', 'rejected', 'snoozed'].includes(resolvedStatus)
+                      ? resolvedStatus
+                      : resolvedStatus === 'waiting'
+                      ? 'waiting'
+                      : qualified
+                      ? 'qualified'
+                      : 'new';
                   const badgeLabel = BADGE_LABELS[badgeVariant] ?? BADGE_LABELS.new;
                   const rowStyle = DECISION_ROW_TONES[resolvedStatus]
                     ? { '--row-bg': DECISION_ROW_TONES[resolvedStatus] }
@@ -1927,11 +2118,12 @@ const Automation = () => {
 
                   return (
                     <tr
-                      key={`${(lead.email || lead.gmail_id || index).toString()}-${index}`}
-                      tabIndex={0}
+                      key={key}
+                      style={rowStyle}
                       onClick={() => handleRowClick(lead)}
                       onKeyDown={(event) => handleRowKeyDown(event, lead)}
-                      style={rowStyle}
+                      role="button"
+                      tabIndex={0}
                     >
                       <td>
                         <LeadName>{displayName}</LeadName>
@@ -1957,7 +2149,19 @@ const Automation = () => {
                       </td>
                       <td>
                         <BadgeColumn>
-                          <StatusBadge $variant={badgeVariant}>{badgeLabel}</StatusBadge>
+                          <StatusBadge 
+                            $variant={badgeVariant}
+                            title={STATUS_TOOLTIPS[badgeVariant] || STATUS_TOOLTIPS.new}
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              if (lead?.email) {
+                                navigate(`/lead/${encodeURIComponent(lead.email)}`);
+                              }
+                            }}
+                          >
+                            {badgeLabel}
+                          </StatusBadge>
                           {decision && (
                             <DecisionNote>
                               {`Рішення: ${DECISION_LABELS[decision.status]} • ${formatRelative(decision.decidedAt)}`}
@@ -1974,17 +2178,42 @@ const Automation = () => {
         </TableWrapper>
       </LeadsPanel>
 
+      {activeModals
+        .filter((modal) => modal?.type === 'reject_modal')
+        .map((modal) => (
+          <ModalOverlay
+            key={modal.id}
+            onClick={() => closeGlobalModal(modal.id)}
+            $shifted={false}
+          >
+            <ModalContent
+              onClick={(event) => event.stopPropagation()}
+              $shifted={false}
+              style={{ height: 'min(86vh, 560px)' }}
+            >
+              <ModalMain>
+                <ModalCloseButton type="button" onClick={() => closeGlobalModal(modal.id)} aria-label="Закрити">
+                  ×
+                </ModalCloseButton>
+                <ModalHeader>
+                  <ModalTitle>{modal?.props?.title || 'Відхилення'}</ModalTitle>
+                </ModalHeader>
+                <ModalScroller>
+                  <ModalBody>{modal?.props?.content}</ModalBody>
+                </ModalScroller>
+              </ModalMain>
+            </ModalContent>
+          </ModalOverlay>
+        ))}
+
       {selectedLead && (
-        <ModalOverlay onClick={closeModal} $shifted={showReader}>
+        <ModalOverlay onClick={closeLocalModal} $shifted={showReader}>
           <ModalContent
             onClick={(event) => event.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
             $shifted={showReader}
-            $expanded={showReader}
           >
             <ModalMain>
-              <ModalCloseButton type="button" onClick={closeModal} aria-label="Закрити">×</ModalCloseButton>
+              <ModalCloseButton type="button" onClick={closeLocalModal} aria-label="Закрити">×</ModalCloseButton>
               <ModalHeader>
                 <ModalTitle>{selectedLead.subject || 'Без теми'}</ModalTitle>
                 <ModalMeta>
@@ -2171,7 +2400,7 @@ const Automation = () => {
                         onClick={handleConfirmClick}
                         disabled={replyLoading}
                       >
-                        Підтвердити
+                        {replyLoading ? 'Генеруємо...' : 'Підтвердити'}
                       </ActionButton>
                     </FooterPrimaryActions>
                   </ModalFooter>
@@ -2301,8 +2530,8 @@ const Automation = () => {
                 <ReplyComposerButton type="button" onClick={closeReplyComposer}>
                   Скасувати
                 </ReplyComposerButton>
-                <ReplyComposerButton type="button" $primary onClick={() => handleDecision('confirmed')}>
-                  Відповісти та підтвердити
+                <ReplyComposerButton type="button" $primary onClick={handleSendReply} disabled={replyLoading || !replyDraft.trim()}>
+                  {replyLoading ? 'Надсилаємо...' : 'Відповісти та підтвердити'}
                 </ReplyComposerButton>
               </div>
             </ReplyComposerActions>

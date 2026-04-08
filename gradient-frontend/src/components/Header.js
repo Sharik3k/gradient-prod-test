@@ -241,7 +241,7 @@ const Header = () => {
       <ThemeToggle />
       <Nav>
         <NavLink to="/" end className={({ isActive }) => (isActive ? 'active' : '')}>Аналітика</NavLink>
-        <NavLink to="/automation" className={({ isActive }) => (isActive ? 'active' : '')}>Автоматизація</NavLink>
+        <NavLink to="/work-zone" className={({ isActive }) => (isActive ? 'active' : '')}>Робоча зона</NavLink>
       </Nav>
       <UserMenu ref={menuRef}>
         <UserButton type="button" onClick={toggleMenu}>

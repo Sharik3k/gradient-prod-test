@@ -46,7 +46,12 @@ const parseJsonSafely = async response => {
 
 const request = async (path, options = {}) => {
   const headers = new Headers(options.headers || {});
-  headers.set('Content-Type', 'application/json');
+  const isFormData =
+    typeof FormData !== 'undefined' && options?.body && options.body instanceof FormData;
+  // For FormData we must NOT set Content-Type manually (browser adds proper boundary).
+  if (!isFormData) {
+    headers.set('Content-Type', 'application/json');
+  }
 
   if (!authToken) {
     loadAuthToken();
@@ -91,7 +96,10 @@ export const postGmailSync = () =>
     method: 'POST',
   });
 
-export const getGmailLeads = () => request('/gmail/leads');
+export const getGmailLeads = (rangeDays = null) => {
+  const qs = rangeDays ? `?range_days=${encodeURIComponent(rangeDays)}` : '';
+  return request(`/gmail/leads${qs}`);
+};
 
 export const postLeadInsights = (payload) =>
   request('/gmail/lead-insights', {
@@ -118,3 +126,30 @@ export const updateReplyPrompts = (payload) =>
     method: 'PUT',
     body: JSON.stringify(payload),
   });
+
+export const getLeadProfile = (leadId) =>
+  request(`/leads/${leadId}`);
+
+export const sendEmailWithAttachments = (payload) => {
+  const formData = new FormData();
+  
+  // Add text fields
+  Object.keys(payload).forEach(key => {
+    if (key !== 'attachments') {
+      formData.append(key, payload[key]);
+    }
+  });
+  
+  // Add files
+  if (payload.attachments) {
+    payload.attachments.forEach(file => {
+      formData.append('attachments', file);
+    });
+  }
+  
+  return request('/email/send', {
+    method: 'POST',
+    body: formData,
+    headers: {}, // Let browser set Content-Type for FormData
+  });
+};
