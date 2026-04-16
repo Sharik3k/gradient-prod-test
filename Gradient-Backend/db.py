@@ -99,9 +99,9 @@ def init_db():
     
     print("[DB] lead_status_history table created")
 
-    # Тепер перевіряємо/додаємо колонку rejection_reason
-    _ensure_column("lead_status_history", "rejection_reason", "TEXT")
-    print("[DB] rejection_reason column ensured")
+    # Видаляємо _ensure_column для rejection_reason, оскільки вона вже є в CREATE TABLE
+    # _ensure_column("lead_status_history", "rejection_reason", "TEXT")
+    print("[DB] rejection_reason column already exists in table definition")
 
     conn.execute("""
     CREATE TABLE IF NOT EXISTS app_settings (
