@@ -15,7 +15,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000", 
         "http://127.0.0.1:3000",
-        "https://your-vercel-app-name.vercel.app"  # Заміни на твою Vercel URL
+        "https://gradient-prod-test.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
