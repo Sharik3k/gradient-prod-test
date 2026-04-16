@@ -247,7 +247,8 @@ const Login = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const { login, loading, error, clearError, isAuthenticated } = useAuth();
+  const [isRegister, setIsRegister] = useState(false);
+  const { login, register, loading, error, clearError, isAuthenticated } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -258,7 +259,12 @@ const Login = () => {
 
   const onSubmit = async event => {
     event.preventDefault();
-    const result = await login({ email, password });
+    let result;
+    if (isRegister) {
+      result = await register({ email, password });
+    } else {
+      result = await login({ email, password });
+    }
     if (result.success) {
       navigate('/', { replace: true });
     }
@@ -278,8 +284,8 @@ const Login = () => {
     <Background>
       <Card>
         <TitleBlock>
-          <h1>Ласкаво просимо назад</h1>
-          <p>Увійдіть, щоб керувати аналітикою, автоматизацією та профілями контактів.</p>
+          <h1>{isRegister ? 'Створення акаунту' : 'Ласкаво просимо назад'}</h1>
+          <p>{isRegister ? 'Зареєструйтеся, щоб почати керувати аналітикою та автоматизацією.' : 'Увійдіть, щоб керувати аналітикою, автоматизацією та профілями контактів.'}</p>
         </TitleBlock>
 
         <Form onSubmit={onSubmit}>
@@ -324,7 +330,7 @@ const Login = () => {
           </Field>
 
           <PrimaryButton type="submit" disabled={loading}>
-            {loading ? 'Входимо…' : 'Увійти'}
+            {loading ? (isRegister ? 'Реєструємо…' : 'Входимо…') : (isRegister ? 'Зареєструватися' : 'Увійти')}
             {!loading && <FiArrowRight />}
           </PrimaryButton>
         </Form>
@@ -336,7 +342,24 @@ const Login = () => {
           Увійти через Google
         </SecondaryButton>
 
-        <Helper>Справжня авторизація з'явиться після підключення бекенду.</Helper>
+        <Helper>
+          {isRegister ? 'Вже є акаунт?' : 'Немає акаунту?'}{' '}
+          <button 
+            type="button" 
+            onClick={() => setIsRegister(!isRegister)}
+            style={{ 
+              background: 'none', 
+              border: 'none', 
+              color: '#6f7dff', 
+              cursor: 'pointer',
+              textDecoration: 'underline',
+              padding: 0,
+              font: 'inherit'
+            }}
+          >
+            {isRegister ? 'Увійдіть' : 'Зареєструйтеся'}
+          </button>
+        </Helper>
         {error && <Message $variant="error">{error}</Message>}
       </Card>
     </Background>
