@@ -79,7 +79,10 @@ def register_user(user):
             conn.commit()
         except Exception as insert_error:
             logger.error(f"User insertion failed: {str(insert_error)}")
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception as rollback_error:
+                logger.warning(f"Rollback failed (no active transaction): {str(rollback_error)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="User creation failed"
@@ -96,8 +99,8 @@ def register_user(user):
         logger.error(f"Unexpected registration error: {str(e)}", exc_info=True)
         try:
             conn.rollback()
-        except:
-            pass  # Ignore rollback errors
+        except Exception as rollback_error:
+            logger.warning(f"Rollback failed (no active transaction): {str(rollback_error)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error during registration"
