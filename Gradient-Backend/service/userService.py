@@ -5,6 +5,9 @@ from jose import jwt, JWTError
 from fastapi import HTTPException, status
 from dotenv import load_dotenv
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -18,34 +21,71 @@ except ValueError:
 
 def register_user(user):
     try:
+        logger.info(f"Starting registration for user: {user.username}, email: {user.email}")
+        
+        # Check environment variables
+        if not SECRET_KEY:
+            logger.error("SECRET_KEY environment variable is missing")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Server configuration error: missing SECRET_KEY"
+            )
+        
         # Check if user already exists
+        logger.info("Checking if user already exists")
         exists = conn.execute(
             "SELECT 1 FROM users WHERE username = ? OR email = ?",
             [user.username, user.email]
         ).fetchone()
 
         if exists:
+            logger.warning(f"User already exists: {user.username}/{user.email}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="User with this username or email already exists"
             )
 
         # Hash password
-        hashed_pwd = hash_password(user.password)
+        logger.info("Hashing password")
+        try:
+            hashed_pwd = hash_password(user.password)
+        except Exception as hash_error:
+            logger.error(f"Password hashing failed: {str(hash_error)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Password processing failed"
+            )
 
         # Get next ID
-        next_id = conn.execute(
-            "SELECT COALESCE(MAX(id), 0) + 1 FROM users"
-        ).fetchone()[0]
+        logger.info("Getting next user ID")
+        try:
+            next_id = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM users"
+            ).fetchone()[0]
+        except Exception as db_error:
+            logger.error(f"Database query failed: {str(db_error)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Database operation failed"
+            )
 
         # Insert user
-        conn.execute(
-            "INSERT INTO users (id, username, email, password) VALUES (?, ?, ?, ?)",
-            [next_id, user.username, user.email, hashed_pwd]
-        )
+        logger.info(f"Inserting user with ID: {next_id}")
+        try:
+            conn.execute(
+                "INSERT INTO users (id, username, email, password) VALUES (?, ?, ?, ?)",
+                [next_id, user.username, user.email, hashed_pwd]
+            )
+            conn.commit()
+        except Exception as insert_error:
+            logger.error(f"User insertion failed: {str(insert_error)}")
+            conn.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="User creation failed"
+            )
         
-        conn.commit()
-        
+        logger.info(f"User registered successfully: {user.username}")
         return {"message": "User created successfully"}
         
     except HTTPException:
@@ -53,8 +93,11 @@ def register_user(user):
         raise
     except Exception as e:
         # Log and handle other exceptions
-        print(f"Registration error: {str(e)}")
-        conn.rollback()
+        logger.error(f"Unexpected registration error: {str(e)}", exc_info=True)
+        try:
+            conn.rollback()
+        except:
+            pass  # Ignore rollback errors
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error during registration"
