@@ -379,19 +379,20 @@ def build_leads_payload_from_db(
             leads.append(lead_dict)
     
     elif user_info and user_info.get("role") == "manager":
-        # Manager sees only their assigned leads
+        # Manager sees all leads (same as admin for now)
         query = """
             SELECT 
-                gmail_id, status, first_name, last_name, full_name, email, subject, 
+                gmail_id, status, first_name, last_name, full_name, gm.email, subject, 
                 received_at, company, body, phone, website, company_name, company_info,
                 person_role, person_links, person_location, person_experience, person_summary,
-                person_insights, company_insights, assigned_to, assigned_at, synced_at, created_at
-            FROM gmail_messages 
-            WHERE assigned_to = ?
+                person_insights, company_insights, assigned_to, assigned_at, synced_at, created_at,
+                u.username as assigned_username, u.role as assigned_role
+            FROM gmail_messages gm
+            LEFT JOIN users u ON gm.assigned_to = u.id
             ORDER BY created_at DESC
             LIMIT ?
         """
-        leads_data = conn.execute(query, [user_info["id"], limit]).fetchall()
+        leads_data = conn.execute(query, [limit]).fetchall()
         
         leads = []
         for lead in leads_data:
@@ -420,7 +421,10 @@ def build_leads_payload_from_db(
                 "assigned_to": lead[21],
                 "assigned_at": lead[22],
                 "synced_at": lead[23],
-                "created_at": lead[24]
+                "created_at": lead[24],
+                "assigned_username": lead[25],
+                "assigned_role": lead[26],
+                "assigned_display": f"[{lead[26].upper()}] {lead[25]}" if lead[25] else None
             }
             
             # Process JSON fields
