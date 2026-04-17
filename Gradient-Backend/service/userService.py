@@ -17,29 +17,48 @@ except ValueError:
     ACCESS_TOKEN_EXPIRE_HOURS = 2
 
 def register_user(user):
-    exists = conn.execute(
-        "SELECT 1 FROM users WHERE username = ? OR email = ?",
-        [user.username, user.email]
-    ).fetchone()
+    try:
+        # Check if user already exists
+        exists = conn.execute(
+            "SELECT 1 FROM users WHERE username = ? OR email = ?",
+            [user.username, user.email]
+        ).fetchone()
 
-    if exists:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username already exists"
+        if exists:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User with this username or email already exists"
+            )
+
+        # Hash password
+        hashed_pwd = hash_password(user.password)
+
+        # Get next ID
+        next_id = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM users"
+        ).fetchone()[0]
+
+        # Insert user
+        conn.execute(
+            "INSERT INTO users (id, username, email, password) VALUES (?, ?, ?, ?)",
+            [next_id, user.username, user.email, hashed_pwd]
         )
-
-    hashed_pwd = hash_password(user.password)
-
-    next_id = conn.execute(
-        "SELECT COALESCE(MAX(id), 0) + 1 FROM users"
-    ).fetchone()[0]
-
-    conn.execute(
-        "INSERT INTO users (id, username, email, password) VALUES (?, ?, ?, ?)",
-        [next_id, user.username, user.email, hashed_pwd]
-    )
-
-    return {"msg": "User registered successfully"}
+        
+        conn.commit()
+        
+        return {"message": "User created successfully"}
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        # Log and handle other exceptions
+        print(f"Registration error: {str(e)}")
+        conn.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error during registration"
+        )
 
 
 def create_access_token(data: dict, expires_delta: timedelta = None):

@@ -27,7 +27,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY,
         username TEXT UNIQUE NOT NULL,
-        email TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'manager' CHECK (role IN ('admin', 'manager'))
     )
@@ -81,6 +81,14 @@ def init_db():
     _ensure_column("gmail_messages", "preprocessing_status", "TEXT DEFAULT 'idle'")
     _ensure_column("gmail_messages", "preprocessed_replies", "TEXT")
     _ensure_column("gmail_messages", "preprocessed_at", "TIMESTAMP")
+    
+    # Add UNIQUE constraint to email column if it doesn't exist
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+        conn.commit()
+        print("[DB] Email UNIQUE constraint added to users table")
+    except Exception as e:
+        print(f"[DB] Warning: Could not add email UNIQUE constraint: {e}")
 
     # Створюємо таблицю lead_status_history з rejection_reason всередині
     conn.execute("""
